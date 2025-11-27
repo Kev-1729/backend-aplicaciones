@@ -1,0 +1,49 @@
+version: '3.8'
+
+services:
+  # ========================================
+  # Backend RAG API - Modo Desarrollo
+  # ========================================
+  backend-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: rag-backend-dev
+    image: rag-backend:dev
+
+    # Variables de entorno
+    env_file:
+      - .env
+    environment:
+      - DEBUG=True
+
+    # Puertos
+    ports:
+      - "8000:8000"
+
+    # Volúmenes para hot-reload
+    volumes:
+      - .:/app
+      - /app/venv
+      - /app/__pycache__
+
+    # Restart policy
+    restart: unless-stopped
+
+    # Networking
+    networks:
+      - rag-network-dev
+
+    # Comando con hot-reload
+    command: python main.py
+
+    # Logging
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  rag-network-dev:
+    driver: bridge
