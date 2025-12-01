@@ -14,6 +14,8 @@ from application.use_cases.get_statistics import GetStatisticsUseCase
 from infrastructure.ai.gemini_embedding_service import GeminiEmbeddingService
 from infrastructure.ai.gemini_chat_service import GeminiChatService
 from infrastructure.database.supabase_vector_store import SupabaseVectorStore
+from infrastructure.database.supabase_chat_session_store import SupabaseChatSessionStore
+from infrastructure.database.supabase_feedback_repository import SupabaseFeedbackRepository
 from infrastructure.config.settings import get_settings
 
 
@@ -69,20 +71,54 @@ def get_vector_store(
     return SupabaseVectorStore(supabase_client)
 
 
+@lru_cache()
+def get_session_store(
+    supabase_client: Annotated[Client, Depends(get_supabase_client)]
+) -> SupabaseChatSessionStore:
+    """
+    Singleton: Chat session store con Supabase
+
+    Args:
+        supabase_client: Cliente de Supabase (inyectado)
+
+    Returns:
+        SupabaseChatSessionStore: Instancia única del session store
+    """
+    return SupabaseChatSessionStore(supabase_client)
+
+
+@lru_cache()
+def get_feedback_repository(
+    supabase_client: Annotated[Client, Depends(get_supabase_client)]
+) -> SupabaseFeedbackRepository:
+    """
+    Singleton: Feedback repository con Supabase
+
+    Args:
+        supabase_client: Cliente de Supabase (inyectado)
+
+    Returns:
+        SupabaseFeedbackRepository: Instancia única del feedback repository
+    """
+    return SupabaseFeedbackRepository(supabase_client)
+
+
 # ========== Use Case Dependencies ==========
 
 def get_query_rag_use_case(
     embedding_service: Annotated[GeminiEmbeddingService, Depends(get_embedding_service)],
     vector_store: Annotated[SupabaseVectorStore, Depends(get_vector_store)],
-    chat_service: Annotated[GeminiChatService, Depends(get_chat_service)]
+    chat_service: Annotated[GeminiChatService, Depends(get_chat_service)],
+    session_store: Annotated[SupabaseChatSessionStore, Depends(get_session_store)]
 ) -> QueryRAGUseCase:
     """
-    Factory: Caso de uso QueryRAG con dependencias inyectadas
+    Factory: Caso de uso QueryRAG con dependencias inyectadas (incluye session store)
 
     Args:
         embedding_service: Servicio de embeddings (inyectado)
         vector_store: Vector store (inyectado)
         chat_service: Servicio de chat (inyectado)
+        session_store: Chat session store (inyectado)
 
     Returns:
         QueryRAGUseCase: Instancia del caso de uso con dependencias
@@ -92,8 +128,10 @@ def get_query_rag_use_case(
         embedding_service=embedding_service,
         vector_store=vector_store,
         chat_service=chat_service,
+        session_store=session_store,
         similarity_threshold=settings.RAG_SIMILARITY_THRESHOLD,
-        top_k=settings.RAG_TOP_K_RESULTS
+        top_k=settings.RAG_TOP_K_RESULTS,
+        max_history_messages=10  # Limitar historial a 10 mensajes
     )
 
 

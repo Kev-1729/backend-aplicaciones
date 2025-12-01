@@ -22,24 +22,29 @@ async def query_rag(
     use_case: Annotated[QueryRAGUseCase, Depends(get_query_rag_use_case)]
 ):
     """
-    Endpoint: Consultar el sistema RAG
+    Endpoint: Consultar el sistema RAG con memoria conversacional
 
     Procesa una consulta del usuario usando RAG:
-    1. Genera embedding de la query
-    2. Busca chunks similares en vector store
-    3. Construye contexto
-    4. Genera respuesta con LLM
+    1. Carga historial de conversación (si session_id existe)
+    2. Genera embedding de la query
+    3. Busca chunks similares en vector store
+    4. Construye contexto
+    5. Genera respuesta con LLM (incluyendo historial)
+    6. Guarda interacción en la sesión
 
     Args:
-        request: QueryRequest con la consulta del usuario
+        request: QueryRequest con la consulta del usuario (y session_id opcional)
         use_case: QueryRAGUseCase inyectado
 
     Returns:
         QueryResponse: Respuesta con answer, sources, etc.
     """
     try:
-        # Convertir HTTP schema → Application DTO
-        input_dto = QueryInput(query=request.query)
+        # Convertir HTTP schema → Application DTO (incluyendo session_id)
+        input_dto = QueryInput(
+            query=request.query,
+            session_id=request.session_id
+        )
 
         # Ejecutar caso de uso
         output_dto = await use_case.execute(input_dto)

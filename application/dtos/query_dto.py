@@ -8,11 +8,12 @@ from typing import List, Optional
 @dataclass
 class QueryInput:
     """
-    DTO de entrada para consultas RAG
+    DTO de entrada para consultas RAG con soporte de sesiones
 
     Representa la solicitud del usuario desde la capa de presentación.
     """
     query: str
+    session_id: Optional[str] = None  # ID de sesión para memoria conversacional
 
     def is_valid(self) -> bool:
         """Valida que la query no esté vacía"""

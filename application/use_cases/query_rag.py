@@ -2,25 +2,30 @@
 Query RAG Use Case - Procesa consultas del usuario usando RAG
 """
 import logging
-from typing import List, Dict
+from typing import List, Dict, Optional
+from datetime import datetime
 from application.dtos.query_dto import QueryInput, QueryOutput
 from domain.interfaces.embedding_service import IEmbeddingService
 from domain.interfaces.vector_store import IVectorStore
 from domain.interfaces.chat_service import IChatService
+from domain.interfaces.chat_session_store import IChatSessionStore
 from domain.entities.query_result import SimilarChunk
+from domain.entities.chat_message import ChatMessage
 
 logger = logging.getLogger(__name__)
 
 
 class QueryRAGUseCase:
     """
-    Caso de uso: Consultar el sistema RAG
+    Caso de uso: Consultar el sistema RAG con memoria conversacional
 
     Orquesta el flujo completo:
-    1. Generar embedding de la query
-    2. Buscar chunks similares en vector store
-    3. Construir contexto
-    4. Generar respuesta con LLM
+    1. Cargar historial de conversación (si existe session_id)
+    2. Generar embedding de la query
+    3. Buscar chunks similares en vector store
+    4. Construir contexto
+    5. Generar respuesta con LLM (incluyendo historial)
+    6. Guardar mensaje del usuario y respuesta en la sesión
     """
 
     def __init__(
@@ -28,32 +33,54 @@ class QueryRAGUseCase:
         embedding_service: IEmbeddingService,
         vector_store: IVectorStore,
         chat_service: IChatService,
+        session_store: Optional[IChatSessionStore] = None,
         similarity_threshold: float = 0.4,
-        top_k: int = 5
+        top_k: int = 5,
+        max_history_messages: int = 10
     ):
         self._embedding_service = embedding_service
         self._vector_store = vector_store
         self._chat_service = chat_service
+        self._session_store = session_store
         self._similarity_threshold = similarity_threshold
         self._top_k = top_k
+        self._max_history_messages = max_history_messages
 
     async def execute(self, input_dto: QueryInput) -> QueryOutput:
         """
-        Ejecuta la consulta RAG
+        Ejecuta la consulta RAG con soporte de memoria conversacional
 
         Args:
-            input_dto: QueryInput con la consulta del usuario
+            input_dto: QueryInput con la consulta del usuario (y session_id opcional)
 
         Returns:
             QueryOutput: Respuesta con answer, sources, etc.
         """
         logger.info(f"\n{'='*50}")
         logger.info(f"[STEP 1] User query: '{input_dto.query}'")
+        if input_dto.session_id:
+            logger.info(f"[STEP 1] Session ID: {input_dto.session_id}")
 
         try:
+            # 0. Cargar historial de conversación si existe session_id
+            conversation_history: List[ChatMessage] = []
+            if self._session_store and input_dto.session_id:
+                conversation_history = await self._load_conversation_history(
+                    input_dto.session_id
+                )
+                logger.info(f"[STEP 0] Loaded {len(conversation_history)} previous messages")
+
             # Detectar comandos especiales (ayuda, FAQ, etc.)
             special_response = self._handle_special_commands(input_dto.query)
             if special_response:
+                # Guardar en sesión si existe
+                if self._session_store and input_dto.session_id:
+                    await self._save_interaction(
+                        input_dto.session_id,
+                        input_dto.query,
+                        special_response.answer,
+                        []
+                    )
                 return special_response
 
             # 1. Generar embedding de la query
@@ -78,8 +105,19 @@ class QueryRAGUseCase:
             # 3. Verificar si se encontraron resultados
             if not similar_chunks:
                 logger.warning("[STEP 3] No similar chunks found")
+                no_results_answer = self._get_no_results_message()
+
+                # Guardar en sesión si existe
+                if self._session_store and input_dto.session_id:
+                    await self._save_interaction(
+                        input_dto.session_id,
+                        input_dto.query,
+                        no_results_answer,
+                        []
+                    )
+
                 return QueryOutput(
-                    answer=self._get_no_results_message(),
+                    answer=no_results_answer,
                     sources=[]
                 )
 
@@ -88,18 +126,29 @@ class QueryRAGUseCase:
             context = self._build_context(similar_chunks)
             logger.info(f"[STEP 4] Context built: {len(context)} characters")
 
-            # 5. Generar respuesta
-            logger.info("[STEP 5] Generating answer with LLM...")
+            # 5. Generar respuesta (CON HISTORIAL)
+            logger.info("[STEP 5] Generating answer with LLM (with conversation history)...")
             answer = await self._chat_service.generate_answer(
                 query=input_dto.query,
-                context=context
+                context=context,
+                conversation_history=conversation_history
             )
             logger.info(f"[STEP 5] Answer generated: {len(answer)} characters")
 
             # 6. Extraer fuentes únicas
             sources = list(set(chunk.get('filename', '') for chunk in similar_chunks))
 
-            logger.info(f"[STEP 6] Query completed successfully")
+            # 7. Guardar interacción en la sesión si existe
+            if self._session_store and input_dto.session_id:
+                await self._save_interaction(
+                    input_dto.session_id,
+                    input_dto.query,
+                    answer,
+                    sources
+                )
+                logger.info(f"[STEP 6] Saved interaction to session {input_dto.session_id}")
+
+            logger.info(f"[STEP 7] Query completed successfully")
             logger.info(f"{'='*50}\n")
 
             return QueryOutput(
@@ -111,6 +160,91 @@ class QueryRAGUseCase:
         except Exception as e:
             logger.error(f"Error processing query: {e}", exc_info=True)
             raise
+
+    async def _load_conversation_history(
+        self,
+        session_id: str
+    ) -> List[ChatMessage]:
+        """
+        Carga el historial de conversación de una sesión
+
+        Args:
+            session_id: ID de la sesión
+
+        Returns:
+            Lista de mensajes (limitada a max_history_messages)
+        """
+        try:
+            if not self._session_store:
+                return []
+
+            # Verificar si la sesión existe, si no, crearla
+            exists = await self._session_store.session_exists(session_id)
+            if not exists:
+                logger.info(f"Creating new session: {session_id}")
+                await self._session_store.create_session(session_id)
+                return []
+
+            # Cargar mensajes recientes
+            messages = await self._session_store.get_messages(
+                session_id,
+                limit=self._max_history_messages
+            )
+
+            return messages
+
+        except Exception as e:
+            logger.error(f"Error loading conversation history: {e}")
+            return []  # En caso de error, continuar sin historial
+
+    async def _save_interaction(
+        self,
+        session_id: str,
+        user_query: str,
+        assistant_answer: str,
+        sources: List[str]
+    ) -> None:
+        """
+        Guarda la interacción usuario-asistente en la sesión
+
+        Args:
+            session_id: ID de la sesión
+            user_query: Pregunta del usuario
+            assistant_answer: Respuesta del asistente
+            sources: Fuentes usadas
+        """
+        try:
+            if not self._session_store:
+                return
+
+            # Crear sesión si no existe
+            exists = await self._session_store.session_exists(session_id)
+            if not exists:
+                await self._session_store.create_session(session_id)
+
+            # Guardar mensaje del usuario
+            user_message = ChatMessage(
+                role='user',
+                content=user_query,
+                created_at=datetime.now()
+            )
+            await self._session_store.add_message(session_id, user_message)
+
+            # Guardar respuesta del asistente
+            assistant_message = ChatMessage(
+                role='assistant',
+                content=assistant_answer,
+                created_at=datetime.now(),
+                metadata={'sources': sources} if sources else None
+            )
+            await self._session_store.add_message(session_id, assistant_message)
+
+            logger.info(f"Saved interaction to session {session_id}")
+
+        except Exception as e:
+            logger.error(f"Error saving interaction: {e}")
+            # No fallar el request si no se puede guardar
+            pass
 
     def _build_context(self, chunks: List[Dict]) -> str:
         """

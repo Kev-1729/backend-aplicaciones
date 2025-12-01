@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import logging
 
-from .routes import rag_router
+from .routes import rag_router, session_router, feedback_router
 from .schemas import HealthResponse
 from infrastructure.config.settings import get_settings
 from presentation.middleware.error_handler import setup_exception_handlers
@@ -42,6 +42,8 @@ def create_app() -> FastAPI:
 
     # Register routers
     app.include_router(rag_router)
+    app.include_router(session_router)
+    app.include_router(feedback_router)
 
     # Setup exception handlers
     setup_exception_handlers(app)
